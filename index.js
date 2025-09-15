@@ -54,51 +54,6 @@ async function run() {
     const plantCollection = db.collection('plants')
     const orderCollection = db.collection('orders')
 
-    // save or update a user in db
-    app.post('/users/:email', async (req, res) => {
-      const email = req.params.email;
-      const user = req.body;
-      const query = { email }
-      const isExist = await userCollection.findOne(query);
-      if (isExist) {
-        return res.send(isExist)
-      }
-
-      const result = await userCollection.insertOne({
-        ...user,
-        role: "customer",
-        timestamp: Date.now(),
-      })
-      res.send(result);
-    })
-
-    // add a plant data in db
-    app.post('/plants', async (req, res) => {
-      const plant = req.body;
-      const result = await plantCollection.insertOne(plant);
-      res.send(result);
-    })
-
-    // get all plants from db
-    app.get('/plants', async (req, res) => {
-      const result = await plantCollection.find().toArray();
-      res.send(result);
-    })
-
-    // get a plant by id
-    app.get('/plants/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await plantCollection.findOne(query);
-      res.send(result);
-    })
-
-    // save order data in db
-    app.post('/order', async (req, res) => {
-      const orderInfo = req.body;
-      const result = await orderCollection.insertOne(orderInfo);
-      res.send(result);
-    })
 
     // Generate jwt token
     app.post('/jwt', async (req, res) => {
@@ -127,6 +82,137 @@ async function run() {
       } catch (err) {
         res.status(500).send(err)
       }
+    })
+
+    // save or update a user in db
+    app.post('/users/:email', async (req, res) => {
+      const email = req.params.email;
+      const user = req.body;
+      const query = { email }
+      const isExist = await userCollection.findOne(query);
+      if (isExist) {
+        return res.send(isExist)
+      }
+
+      const result = await userCollection.insertOne({
+        ...user,
+        role: "customer",
+        timestamp: Date.now(),
+      })
+      res.send(result);
+    })
+
+    // manage users status
+    app.patch('/users/:email', async (req, res) => {
+      const email = req.params.email;
+      const query = { email };
+      const user = await userCollection.findOne(query);
+      if (!user || user?.status === 'Requested')
+        return res.status(400).send('You have already requested, wait for some time.')
+      const updatedDoc = {
+        $set: {
+          status: 'Requested',
+        }
+      }
+      const result = await userCollection.updateOne(query, updatedDoc)
+      res.send(result);
+    })
+
+    // add a plant data in db
+    app.post('/plants', async (req, res) => {
+      const plant = req.body;
+      const result = await plantCollection.insertOne(plant);
+      res.send(result);
+    })
+
+    // get all plants from db
+    app.get('/plants', async (req, res) => {
+      const result = await plantCollection.find().toArray();
+      res.send(result);
+    })
+
+    // get a plant by id
+    app.get('/plants/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await plantCollection.findOne(query);
+      res.send(result);
+    })
+
+    // Manage plant quantity
+    app.patch('/plants/quantity/:id', async (req, res) => {
+      const id = req.params.id;
+      const { quantityToUpdate, status } = req.body;
+      const filter = { _id: new ObjectId(id) };
+      let updatedDoc = {
+        $inc: { quantity: -quantityToUpdate },
+      }
+      if (status === 'increase') {
+        updatedDoc = {
+          $inc: { quantity: quantityToUpdate },
+        }
+      }
+      const result = await plantCollection.updateOne(filter, updatedDoc);
+      res.send(result);
+    })
+
+    // save order data in db
+    app.post('/order', async (req, res) => {
+      const orderInfo = req.body;
+      const result = await orderCollection.insertOne(orderInfo);
+      res.send(result);
+    })
+
+
+    // get all orders for a specific user by email
+    app.get('/customer-orders/:email', async (req, res) => {
+      const email = req.params.email;
+      const result = await orderCollection.aggregate([
+        {
+          $match: { 'customer.email': email },
+        },
+        {
+          $addFields: {
+            plantId: { $toObjectId: '$plantId' },
+          }
+        },
+        {
+          $lookup: {
+            from: 'plants',
+            localField: 'plantId',
+            foreignField: '_id',
+            as: 'plants',
+          }
+        },
+        {
+          $unwind: '$plants'
+        },
+        {
+          $addFields: {
+            name: '$plants.name',
+            imageUrl: '$plants.imageUrl',
+            category: '$plants.category',
+          }
+        },
+        {
+          $project: {
+            plants: 0,
+          },
+        }
+      ]).toArray();
+      res.send(result);
+    });
+
+    // Cancellation / delete one order
+    app.delete('/orders/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const order = await orderCollection.findOne(query);
+      if (order.status === 'delivered') {
+        return res.status(409).send('Cannot cancel once thae product is delivered!')
+      }
+      const result = await orderCollection.deleteOne(query);
+      res.send(result);
     })
 
     // Send a ping to confirm a successful connection
