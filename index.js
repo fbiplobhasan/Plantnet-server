@@ -41,6 +41,36 @@ const uri = "mongodb://localhost:27017";
 // const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.dqhfr.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
+
+// Generate jwt token
+app.post('/jwt', async (req, res) => {
+  const email = req.body
+  const token = jwt.sign(email, process.env.ACCESS_TOKEN_SECRET, {
+    expiresIn: '365d',
+  })
+  res
+    .cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
+    })
+    .send({ success: true })
+})
+// Logout
+app.get('/logout', async (req, res) => {
+  try {
+    res
+      .clearCookie('token', {
+        maxAge: 0,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
+      })
+      .send({ success: true })
+  } catch (err) {
+    res.status(500).send(err)
+  }
+})
+
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -56,35 +86,24 @@ async function run() {
     const plantCollection = db.collection('plants')
     const orderCollection = db.collection('orders')
 
-
-    // Generate jwt token
-    app.post('/jwt', async (req, res) => {
-      const email = req.body
-      const token = jwt.sign(email, process.env.ACCESS_TOKEN_SECRET, {
-        expiresIn: '365d',
-      })
-      res
-        .cookie('token', token, {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
-        })
-        .send({ success: true })
-    })
-    // Logout
-    app.get('/logout', async (req, res) => {
-      try {
-        res
-          .clearCookie('token', {
-            maxAge: 0,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
-          })
-          .send({ success: true })
-      } catch (err) {
-        res.status(500).send(err)
-      }
-    })
+    // verify admin middleware
+    const verifyAdmin = async (req, res, next) => {
+      // console.log('data from vefifyToken middleware---->', req.user?.email)
+      const email = req.user?.email;
+      const query = { email };
+      const result = await userCollection.findOne(query);
+      if (!result || result?.role !== 'admin') return res.status(403).send({ message: 'Firbidden access!' })
+      next();
+    }
+    // verify seller middleware
+    const verifySeller = async (req, res, next) => {
+      // console.log('data from vefifyToken middleware---->', req.user?.email)
+      const email = req.user?.email;
+      const query = { email };
+      const result = await userCollection.findOne(query);
+      if (!result || result?.role !== 'seller') return res.status(403).send({ message: 'Firbidden access!' })
+      next();
+    }
 
     // save or update a user in db
     app.post('/users/:email', async (req, res) => {
@@ -104,11 +123,39 @@ async function run() {
       res.send(result);
     })
 
+    // get inventory data for seller
+    app.get('/plants/seller', verifyToken, verifySeller, async (req, res) => {
+      const email = req?.user?.email;
+      console.log(email);
+      const result = await plantCollection.find({ 'seller.email': email }).toArray();
+      res.send(result);
+    })
+
+    // delete a plant from db by seller
+    app.delete('/plants/:id', verifyToken, verifySeller, async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await plantCollection.deleteOne(query);
+      res.send(result);
+    })
+
     // get all user data
-    app.get('/all-users/:email', verifyToken, async (req, res) => {
+    app.get('/all-users/:email', verifyToken, verifyAdmin, async (req, res) => {
       const email = req.params.email;
       const query = { email: { $ne: email } }
       const result = await userCollection.find(query).toArray();
+      res.send(result);
+    })
+
+    // update a user role and status
+    app.patch('/user/role/:email', verifyToken, verifyAdmin, async (req, res) => {
+      const email = req.params.email;
+      const { role } = req.body;
+      const filter = { email };
+      const updateDoc = {
+        $set: { role, status: 'verified' },
+      }
+      const result = await userCollection.updateOne(filter, updateDoc);
       res.send(result);
     })
 
@@ -209,6 +256,43 @@ async function run() {
             name: '$plants.name',
             imageUrl: '$plants.imageUrl',
             category: '$plants.category',
+          }
+        },
+        {
+          $project: {
+            plants: 0,
+          },
+        }
+      ]).toArray();
+      res.send(result);
+    });
+
+     // get all orders for a specific seller by email
+    app.get('/seller-orders/:email', verifyToken,verifySeller, async (req, res) => {
+      const email = req.params.email;
+      const result = await orderCollection.aggregate([
+        {
+          $match: { seller: email },
+        },
+        {
+          $addFields: {
+            plantId: { $toObjectId: '$plantId' },
+          }
+        },
+        {
+          $lookup: {
+            from: 'plants',
+            localField: 'plantId',
+            foreignField: '_id',
+            as: 'plants',
+          }
+        },
+        {
+          $unwind: '$plants'
+        },
+        {
+          $addFields: {
+            name: '$plants.name',
           }
         },
         {
