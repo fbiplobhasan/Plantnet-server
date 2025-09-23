@@ -1,6 +1,7 @@
 require('dotenv').config()
 const express = require('express')
 const cors = require('cors')
+const nodemailer = require("nodemailer");
 const cookieParser = require('cookie-parser')
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb')
 const jwt = require('jsonwebtoken')
@@ -35,6 +36,45 @@ const verifyToken = async (req, res, next) => {
     next()
   })
 }
+
+// send email using nodemailer
+const sendEmail = (emailAddress, emailData) => {
+  // Create a transporter for SMTP
+  const transporter = nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 587,
+    secure: false, // true for port 465, false for other port
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  });
+  // verify connection
+  transporter.verify((error, success) => {
+    if (error) {
+      console.log(error)
+    } else {
+      console.log('Transporter is ready to emails.', success);
+    }
+  })
+  const mailBody = {
+    from: process.env.SMTP_USER, //sender address
+    to: emailAddress,
+    subject: emailData?.subject,
+    // text: emailData?.message, // plain‑text body
+    html: `<p>${emailData?.message}</p>`, // HTML body
+  }
+  // send email
+  transporter.sendMail(mailBody, (error, info) => {
+    if (error) {
+      console.log(error);
+    } else {
+      console.log(info);
+      console.log('Email Sent: ' + info?.response);
+    }
+  });
+}
+
 
 const uri = "mongodb://localhost:27017";
 
@@ -107,6 +147,7 @@ async function run() {
 
     // save or update a user in db
     app.post('/users/:email', async (req, res) => {
+      sendEmail();
       const email = req.params.email;
       const user = req.body;
       const query = { email }
@@ -224,6 +265,22 @@ async function run() {
     app.post('/order', async (req, res) => {
       const orderInfo = req.body;
       const result = await orderCollection.insertOne(orderInfo);
+      // send Email
+      if (result.insertedId) {
+        //To customer
+        sendEmail(orderInfo?.customer?.email, {
+          subject: 'Order Successful',
+          message: `You've place an order successfully. Transaction id: ${result?.insertedId}`
+        })
+
+        // To seller
+        sendEmail(orderInfo?.seller, {
+          subject: 'Hurray!, You have an order to process.',
+          message: `Get the plants ready for ${orderInfo?.customer?.name}`
+        })
+      }
+
+
       res.send(result);
     })
 
@@ -267,8 +324,8 @@ async function run() {
       res.send(result);
     });
 
-     // get all orders for a specific seller by email
-    app.get('/seller-orders/:email', verifyToken,verifySeller, async (req, res) => {
+    // get all orders for a specific seller by email
+    app.get('/seller-orders/:email', verifyToken, verifySeller, async (req, res) => {
       const email = req.params.email;
       const result = await orderCollection.aggregate([
         {
@@ -304,6 +361,19 @@ async function run() {
       res.send(result);
     });
 
+    // update a order status
+    app.patch('/orders/:id', verifyToken, verifySeller, async (req, res) => {
+      const id = req.params.id;
+      const { status } = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: { status },
+      }
+      const result = await orderCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    })
+
+
     // Cancellation / delete one order
     app.delete('/orders/:id', async (req, res) => {
       const id = req.params.id;
@@ -314,6 +384,71 @@ async function run() {
       }
       const result = await orderCollection.deleteOne(query);
       res.send(result);
+    })
+
+    // admin stat
+    app.get('/admin-stat', verifyToken, verifyAdmin, async (req, res) => {
+      const totalUser = await userCollection.estimatedDocumentCount();
+      const totalPlants = await plantCollection.estimatedDocumentCount();
+
+      const allOrder = await orderCollection.find().toArray();
+      // const totalOrder = allOrder.length
+      // const totalPrice = allOrder.reduce((sum, order) => sum + order.price, 0)
+
+      // generate chart data
+      //const myData = {
+      // date: "11/01/2025",
+      // quantity: 12,
+      // price: 1500,
+      // order: 3,
+      //}
+
+      const chartData = await orderCollection.aggregate([
+        {
+          $group: {
+            _id: {
+              $dateToString: {
+                format: '%Y-%m-%d',
+                date: { $toDate: '$_id' },
+              },
+            },
+            quantity: {
+              $sum: '$quantity',
+            },
+            price: { $sum: '$price' },
+            order: { $sum: 1 },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            date: '$_id',
+            quantity: 1,
+            order: 1,
+            price: 1,
+          },
+        },
+      ]).next();
+
+      console.log(chartData);
+
+      // get total revenue, total order
+      const orderDetails = await orderCollection.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalRevenue: { $sum: '$price' },
+            totalOrder: { $sum: 1 }
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+          },
+        },
+      ]).next();
+
+      res.send({ totalPlants, totalUser, ...orderDetails, chartData: [chartData] })
     })
 
     // Send a ping to confirm a successful connection
